@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import platform
 import re
 import socket
 import sys
 import threading
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -1296,9 +1298,33 @@ def _resolve_icon_path() -> Path | None:
     return None
 
 
+def _setup_windowed_logging() -> None:
+    """Registra errores en ~/.ethqual/ethqual.log cuando la app corre sin consola (--windowed)."""
+    log_dir = Path.home() / ".ethqual"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        logging.basicConfig(
+            filename=str(log_dir / "ethqual.log"),
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+        )
+    except OSError:
+        pass
+
+    def _excepthook(exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        tb_text = "".join(traceback.format_exception(exc_type, exc_val, exc_tb))
+        logging.error("Excepción no controlada:\n%s", tb_text)
+        if QApplication.instance() is not None:
+            QMessageBox.critical(None, "Error inesperado — ethqual", f"{exc_val}\n\nDetalle guardado en ~/.ethqual/ethqual.log")
+
+    sys.excepthook = _excepthook
+
+
 def main() -> None:
+    _setup_windowed_logging()
     app = QApplication(sys.argv)
     app.setApplicationName("ethqual")
+    app.setApplicationVersion("0.2.0")
     icon_path = _resolve_icon_path()
     if icon_path is not None:
         app.setWindowIcon(QIcon(str(icon_path)))

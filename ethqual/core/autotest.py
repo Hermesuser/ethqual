@@ -11,7 +11,7 @@ import time
 from typing import Any
 
 from ethqual.core.lldp import get_lldp_neighbor
-from ethqual.core.metrics import run_ping
+from ethqual.core.metrics import no_window_kwargs, run_ping
 
 
 def get_default_gateway() -> str | None:
@@ -45,6 +45,7 @@ def get_default_gateway() -> str | None:
                 text=True,
                 timeout=3.0,
                 check=False,
+                **no_window_kwargs(),
             )
             match = re.search(
                 r"0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)", proc.stdout
@@ -138,7 +139,7 @@ def check_ip_conflict_arp(target_ip: str | None) -> dict[str, Any]:
     mac_re = re.compile(r"([0-9a-fA-F]{1,2}(?:[:-][0-9a-fA-F]{1,2}){5})")
     macs: set[str] = set()
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3.0, check=False)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3.0, check=False, **no_window_kwargs())
         for line in proc.stdout.splitlines():
             if target_ip in line:
                 m = mac_re.search(line)

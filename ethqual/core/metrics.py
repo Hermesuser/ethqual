@@ -47,6 +47,13 @@ class NicSnapshot:
         return asdict(self)
 
 
+def no_window_kwargs() -> dict[str, Any]:
+    """Evita ventanas de consola emergentes en Windows al ejecutar subprocesos desde la GUI."""
+    if platform.system() == "Windows" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
 def detect_interface_by_ip(local_ip: str) -> str | None:
     """Identifica el nombre de la interfaz local asociada a `local_ip`."""
     try:
@@ -185,6 +192,7 @@ def run_ping(target_ip: str, count: int = 4, timeout_ms: int = 1000) -> dict[str
             text=True,
             timeout=(count * (timeout_ms / 1000.0)) + 5.0,
             check=False,
+            **no_window_kwargs(),
         )
         output = f"{proc.stdout}\n{proc.stderr}"
     except (OSError, subprocess.SubprocessError) as exc:
@@ -250,7 +258,12 @@ def get_arp_mac(target_ip: str) -> str | None:
     for cmd in commands:
         try:
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=3.0, check=False
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                check=False,
+                **no_window_kwargs(),
             )
         except (OSError, subprocess.SubprocessError):
             continue
