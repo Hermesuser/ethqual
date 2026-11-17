@@ -1,0 +1,53 @@
+name: Build Native Executables
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            artifact: ethqual-macos-arm64
+            pyinstaller_args: "--windowed --name ethqual --icon ethqual/assets/icon.icns --add-data ethqual/assets/icon.png:ethqual/assets"
+          - os: macos-13
+            artifact: ethqual-macos-intel-x86_64
+            pyinstaller_args: "--windowed --name ethqual --icon ethqual/assets/icon.icns --add-data ethqual/assets/icon.png:ethqual/assets"
+          - os: windows-latest
+            artifact: ethqual-windows-11-x64
+            pyinstaller_args: "--windowed --onefile --name ethqual --icon ethqual/assets/icon.ico --add-data ethqual/assets/icon.png;ethqual/assets"
+          - os: ubuntu-latest
+            artifact: ethqual-linux-x86_64
+            pyinstaller_args: "--onefile --name ethqual --icon ethqual/assets/icon.png --add-data ethqual/assets/icon.png:ethqual/assets"
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt PySide6 pyinstaller
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build native binary
+        run: pyinstaller ${{ matrix.pyinstaller_args }} gui.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/

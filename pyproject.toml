@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ethqual"
+version = "0.2.0"
+description = "Herramienta CLI de diagnóstico y cualificación de enlaces Ethernet punto a punto"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "psutil>=5.9.0",
+]
+
+[project.scripts]
+ethqual-server = "server:main"
+ethqual-client = "client:main"
+
+[project.gui-scripts]
+ethqual-gui = "gui:main"
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.6.0"]
+
+[tool.setuptools]
+packages = ["ethqual", "ethqual.core", "ethqual.gui"]
+py-modules = ["client", "server", "gui"]
+
+[tool.setuptools.package-data]
+ethqual = ["assets/*"]
