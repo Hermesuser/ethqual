@@ -12,18 +12,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest
             artifact: ethqual-macos-arm64
-            pyinstaller_args: "--windowed --name ethqual --icon ethqual/assets/icon.icns --add-data ethqual/assets/icon.png:ethqual/assets"
+            pyinstaller_args: '--windowed --name ethqual --icon ethqual/assets/icon.icns --add-data "ethqual/assets/icon.png:ethqual/assets"'
           - os: macos-13
             artifact: ethqual-macos-intel-x86_64
-            pyinstaller_args: "--windowed --name ethqual --icon ethqual/assets/icon.icns --add-data ethqual/assets/icon.png:ethqual/assets"
+            pyinstaller_args: '--windowed --name ethqual --icon ethqual/assets/icon.icns --add-data "ethqual/assets/icon.png:ethqual/assets"'
           - os: windows-latest
             artifact: ethqual-windows-11-x64
-            pyinstaller_args: "--windowed --onefile --name ethqual --icon ethqual/assets/icon.ico --add-data ethqual/assets/icon.png;ethqual/assets"
+            pyinstaller_args: '--windowed --onefile --name ethqual --icon ethqual/assets/icon.ico --add-data "ethqual/assets/icon.png;ethqual/assets"'
           - os: ubuntu-latest
             artifact: ethqual-linux-x86_64
-            pyinstaller_args: "--onefile --name ethqual --icon ethqual/assets/icon.png --add-data ethqual/assets/icon.png:ethqual/assets"
+            pyinstaller_args: '--onefile --name ethqual --icon ethqual/assets/icon.png --add-data "ethqual/assets/icon.png:ethqual/assets"'
 
     runs-on: ${{ matrix.os }}
 
@@ -44,7 +44,8 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Build native binary
-        run: pyinstaller ${{ matrix.pyinstaller_args }} gui.py
+        shell: bash
+        run: pyinstaller --noconfirm ${{ matrix.pyinstaller_args }} gui.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
