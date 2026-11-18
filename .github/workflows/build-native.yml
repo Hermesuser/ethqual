@@ -15,7 +15,7 @@ jobs:
           - os: macos-latest
             artifact: ethqual-macos-arm64
             pyinstaller_args: '--windowed --name ethqual --icon ethqual/assets/icon.icns --add-data "ethqual/assets/icon.png:ethqual/assets"'
-          - os: macos-13
+          - os: macos-15-intel
             artifact: ethqual-macos-intel-x86_64
             pyinstaller_args: '--windowed --name ethqual --icon ethqual/assets/icon.icns --add-data "ethqual/assets/icon.png:ethqual/assets"'
           - os: windows-latest
