@@ -1,10 +1,13 @@
-name: Build Native Executables
+name: Build Native Installers
 
 on:
   workflow_dispatch:
   push:
     tags:
       - "v*"
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -13,17 +16,21 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            artifact: ethqual-macos-arm64
-            pyinstaller_args: '--windowed --name ethqual --icon ethqual/assets/icon.icns --add-data "ethqual/assets/icon.png:ethqual/assets"'
+            platform_id: macos-arm64
+            pyinstaller_args: '--windowed --name ethqual --osx-bundle-identifier com.ethqual.app --icon ethqual/assets/icon.icns --add-data "ethqual/assets/icon.png:ethqual/assets"'
+            installer_file: ethqual-macos-arm64.dmg
           - os: macos-15-intel
-            artifact: ethqual-macos-intel-x86_64
-            pyinstaller_args: '--windowed --name ethqual --icon ethqual/assets/icon.icns --add-data "ethqual/assets/icon.png:ethqual/assets"'
+            platform_id: macos-intel-x86_64
+            pyinstaller_args: '--windowed --name ethqual --osx-bundle-identifier com.ethqual.app --icon ethqual/assets/icon.icns --add-data "ethqual/assets/icon.png:ethqual/assets"'
+            installer_file: ethqual-macos-intel-x86_64.dmg
           - os: windows-latest
-            artifact: ethqual-windows-11-x64
+            platform_id: windows-11-x64
             pyinstaller_args: '--windowed --onefile --name ethqual --icon ethqual/assets/icon.ico --add-data "ethqual/assets/icon.png;ethqual/assets"'
+            installer_file: ethqual-setup-windows-x64.exe
           - os: ubuntu-latest
-            artifact: ethqual-linux-x86_64
+            platform_id: linux-x86_64
             pyinstaller_args: '--onefile --name ethqual --icon ethqual/assets/icon.png --add-data "ethqual/assets/icon.png:ethqual/assets"'
+            installer_file: ethqual-linux-amd64.deb
 
     runs-on: ${{ matrix.os }}
 
@@ -47,8 +54,53 @@ jobs:
         shell: bash
         run: pyinstaller --noconfirm ${{ matrix.pyinstaller_args }} gui.py
 
-      - name: Upload artifact
+      - name: Build macOS DMG installer
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          chmod +x packaging/macos/build_dmg.sh
+          ./packaging/macos/build_dmg.sh "${{ matrix.installer_file }}"
+
+      - name: Build Windows Setup EXE (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            $isccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+            if (-not (Test-Path $isccPath)) {
+              choco install innosetup -y --no-progress
+            }
+          }
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue)?.Source
+          if (-not $iscc) { $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" }
+          & $iscc packaging\windows\ethqual.iss
+
+      - name: Build Linux DEB package
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          chmod +x packaging/linux/build_deb.sh
+          ./packaging/linux/build_deb.sh "0.2.0" "${{ matrix.installer_file }}"
+
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/
+          name: ${{ matrix.platform_id }}
+          path: dist/${{ matrix.installer_file }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all installers
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
