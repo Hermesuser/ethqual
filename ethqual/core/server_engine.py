@@ -68,17 +68,21 @@ def _run_throughput_receiver(
     chunk_size = _clamp_chunk_size(chunk_size)
     conns: list[socket.socket] = []
     byte_counts: list[int] = [0] * streams
+    errors: list[Exception] = []
     workers_started = False
 
     def _worker(idx: int, conn: socket.socket) -> None:
         total = 0
-        with conn:
-            conn.settimeout(30.0)
-            while True:
-                data = conn.recv(chunk_size)
-                if not data:
-                    break
-                total += len(data)
+        try:
+            with conn:
+                conn.settimeout(30.0)
+                while True:
+                    data = conn.recv(chunk_size)
+                    if not data:
+                        break
+                    total += len(data)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
         byte_counts[idx] = total
 
     try:
@@ -95,6 +99,8 @@ def _run_throughput_receiver(
             t.start()
         for t in threads:
             t.join()
+        if errors:
+            raise errors[0]
         elapsed = max(1e-6, time.perf_counter() - start)
     finally:
         if not workers_started:
@@ -121,15 +127,19 @@ def _run_throughput_sender(
     payload = os.urandom(chunk_size)
     conns: list[socket.socket] = []
     byte_counts: list[int] = [0] * streams
+    errors: list[Exception] = []
     workers_started = False
 
     def _worker(idx: int, conn: socket.socket, deadline: float) -> None:
         sent = 0
-        with conn:
-            conn.settimeout(30.0)
-            while time.perf_counter() < deadline:
-                conn.sendall(payload)
-                sent += chunk_size
+        try:
+            with conn:
+                conn.settimeout(30.0)
+                while time.perf_counter() < deadline:
+                    conn.sendall(payload)
+                    sent += chunk_size
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
         byte_counts[idx] = sent
 
     try:
@@ -147,6 +157,8 @@ def _run_throughput_sender(
             t.start()
         for t in threads:
             t.join()
+        if errors:
+            raise errors[0]
         elapsed = max(1e-6, time.perf_counter() - start)
     finally:
         if not workers_started:
@@ -173,12 +185,19 @@ def _run_full_duplex_server(
 ) -> dict[str, Any]:
     """Ejecuta recepción y transmisión TCP simultáneas (Full-Duplex real)."""
     results: dict[str, Any] = {}
+    errors: list[Exception] = []
 
     def _rx() -> None:
-        results["server_rx"] = _run_throughput_receiver(rx_sock, chunk_size, streams)
+        try:
+            results["server_rx"] = _run_throughput_receiver(rx_sock, chunk_size, streams)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
 
     def _tx() -> None:
-        results["server_tx"] = _run_throughput_sender(tx_sock, duration_s, chunk_size, streams)
+        try:
+            results["server_tx"] = _run_throughput_sender(tx_sock, duration_s, chunk_size, streams)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
 
     t_rx = threading.Thread(target=_rx, daemon=True)
     t_tx = threading.Thread(target=_tx, daemon=True)
@@ -186,6 +205,8 @@ def _run_full_duplex_server(
     t_tx.start()
     t_rx.join()
     t_tx.join()
+    if errors:
+        raise errors[0]
     return results
 
 
@@ -322,76 +343,82 @@ def handle_client_session(ctrl_conn: socket.socket, forced_iface: str | None) ->
             break
 
         cmd = msg.get("cmd")
-        if cmd == "HELLO":
-            send_control_msg(
-                ctrl_conn,
-                {
-                    "status": "OK",
-                    "os": platform.system(),
-                    "hostname": socket.gethostname(),
-                    "server_ip": local_ip,
-                    "interface": iface,
-                    "link_info": get_link_info(iface).to_dict(),
-                },
-            )
-        elif cmd == "SNAPSHOT_NIC":
-            label = str(msg.get("label", "unknown"))
-            snap = get_nic_snapshot(iface).to_dict()
-            session_metrics[f"nic_{label}"] = snap
-            send_control_msg(ctrl_conn, {"status": "OK", "snapshot": snap})
-        elif cmd == "START_THROUGHPUT":
-            chunk_size = _clamp_chunk_size(msg.get("chunk_size", 65536))
-            streams = _clamp_streams(msg.get("streams", 1))
-            data_sock, data_port = _open_ephemeral_data_socket(local_ip, backlog=streams)
-            send_control_msg(ctrl_conn, {"status": "READY", "data_port": data_port})
-            session_metrics["throughput"] = _run_throughput_receiver(
-                data_sock, chunk_size, streams
-            )
-        elif cmd == "START_THROUGHPUT_REVERSE":
-            duration_s = max(1, min(600, int(msg.get("duration_s", 10))))
-            chunk_size = _clamp_chunk_size(msg.get("chunk_size", 65536))
-            streams = _clamp_streams(msg.get("streams", 1))
-            data_sock, data_port = _open_ephemeral_data_socket(local_ip, backlog=streams)
-            send_control_msg(ctrl_conn, {"status": "READY", "data_port": data_port})
-            session_metrics["throughput_reverse"] = _run_throughput_sender(
-                data_sock, duration_s, chunk_size, streams
-            )
-        elif cmd == "START_THROUGHPUT_DUPLEX":
-            duration_s = max(1, min(600, int(msg.get("duration_s", 10))))
-            chunk_size = _clamp_chunk_size(msg.get("chunk_size", 65536))
-            streams = _clamp_streams(msg.get("streams", 1))
-            rx_sock, rx_port = _open_ephemeral_data_socket(local_ip, backlog=streams)
-            tx_sock, tx_port = _open_ephemeral_data_socket(local_ip, backlog=streams)
-            send_control_msg(
-                ctrl_conn,
-                {"status": "READY", "rx_port": rx_port, "tx_port": tx_port},
-            )
-            session_metrics["throughput_duplex"] = _run_full_duplex_server(
-                rx_sock, tx_sock, duration_s, chunk_size, streams
-            )
-        elif cmd == "START_BER":
-            data_sock, data_port = _open_ephemeral_data_socket(local_ip)
-            send_control_msg(ctrl_conn, {"status": "READY", "data_port": data_port})
-            session_metrics["ber"] = _run_ber_receiver(data_sock)
-        elif cmd == "START_UDP_JITTER":
-            duration_s = int(msg.get("duration_s", 3))
-            expected_packets = int(msg.get("expected_packets", 600))
-            udp_sock, udp_port = _open_ephemeral_udp_socket(local_ip)
-            send_control_msg(ctrl_conn, {"status": "READY", "data_port": udp_port})
-            session_metrics["udp_jitter"] = _run_udp_jitter_receiver(
-                udp_sock, duration_s, expected_packets
-            )
-        elif cmd == "START_WIGGLE":
-            max_dur = int(msg.get("max_duration_s", 120))
-            udp_sock, udp_port = _open_ephemeral_udp_socket(local_ip)
-            send_control_msg(ctrl_conn, {"status": "READY", "data_port": udp_port})
-            session_metrics["wiggle"] = _run_wiggle_echo(udp_sock, max_dur)
-        elif cmd == "GET_RESULTS":
-            send_control_msg(ctrl_conn, {"status": "OK", "results": session_metrics})
-        elif cmd == "BYE":
-            send_control_msg(ctrl_conn, {"status": "OK"})
-            break
-        else:
-            send_control_msg(
-                ctrl_conn, {"status": "ERROR", "error": f"Comando desconocido: {cmd}"}
-            )
+        try:
+            if cmd == "HELLO":
+                send_control_msg(
+                    ctrl_conn,
+                    {
+                        "status": "OK",
+                        "os": platform.system(),
+                        "hostname": socket.gethostname(),
+                        "server_ip": local_ip,
+                        "interface": iface,
+                        "link_info": get_link_info(iface).to_dict(),
+                    },
+                )
+            elif cmd == "SNAPSHOT_NIC":
+                label = str(msg.get("label", "unknown"))
+                snap = get_nic_snapshot(iface).to_dict()
+                session_metrics[f"nic_{label}"] = snap
+                send_control_msg(ctrl_conn, {"status": "OK", "snapshot": snap})
+            elif cmd == "START_THROUGHPUT":
+                chunk_size = _clamp_chunk_size(msg.get("chunk_size", 65536))
+                streams = _clamp_streams(msg.get("streams", 1))
+                data_sock, data_port = _open_ephemeral_data_socket(local_ip, backlog=streams)
+                send_control_msg(ctrl_conn, {"status": "READY", "data_port": data_port})
+                session_metrics["throughput"] = _run_throughput_receiver(
+                    data_sock, chunk_size, streams
+                )
+            elif cmd == "START_THROUGHPUT_REVERSE":
+                duration_s = max(1, min(600, int(msg.get("duration_s", 10))))
+                chunk_size = _clamp_chunk_size(msg.get("chunk_size", 65536))
+                streams = _clamp_streams(msg.get("streams", 1))
+                data_sock, data_port = _open_ephemeral_data_socket(local_ip, backlog=streams)
+                send_control_msg(ctrl_conn, {"status": "READY", "data_port": data_port})
+                session_metrics["throughput_reverse"] = _run_throughput_sender(
+                    data_sock, duration_s, chunk_size, streams
+                )
+            elif cmd == "START_THROUGHPUT_DUPLEX":
+                duration_s = max(1, min(600, int(msg.get("duration_s", 10))))
+                chunk_size = _clamp_chunk_size(msg.get("chunk_size", 65536))
+                streams = _clamp_streams(msg.get("streams", 1))
+                rx_sock, rx_port = _open_ephemeral_data_socket(local_ip, backlog=streams)
+                tx_sock, tx_port = _open_ephemeral_data_socket(local_ip, backlog=streams)
+                send_control_msg(
+                    ctrl_conn,
+                    {"status": "READY", "rx_port": rx_port, "tx_port": tx_port},
+                )
+                session_metrics["throughput_duplex"] = _run_full_duplex_server(
+                    rx_sock, tx_sock, duration_s, chunk_size, streams
+                )
+            elif cmd == "START_BER":
+                data_sock, data_port = _open_ephemeral_data_socket(local_ip)
+                send_control_msg(ctrl_conn, {"status": "READY", "data_port": data_port})
+                session_metrics["ber"] = _run_ber_receiver(data_sock)
+            elif cmd == "START_UDP_JITTER":
+                duration_s = max(1, min(300, int(msg.get("duration_s", 3))))
+                expected_packets = max(1, min(2_000_000, int(msg.get("expected_packets", 600))))
+                udp_sock, udp_port = _open_ephemeral_udp_socket(local_ip)
+                send_control_msg(ctrl_conn, {"status": "READY", "data_port": udp_port})
+                session_metrics["udp_jitter"] = _run_udp_jitter_receiver(
+                    udp_sock, duration_s, expected_packets
+                )
+            elif cmd == "START_WIGGLE":
+                max_dur = int(msg.get("max_duration_s", 120))
+                udp_sock, udp_port = _open_ephemeral_udp_socket(local_ip)
+                send_control_msg(ctrl_conn, {"status": "READY", "data_port": udp_port})
+                session_metrics["wiggle"] = _run_wiggle_echo(udp_sock, max_dur)
+            elif cmd == "GET_RESULTS":
+                send_control_msg(ctrl_conn, {"status": "OK", "results": session_metrics})
+            elif cmd == "BYE":
+                send_control_msg(ctrl_conn, {"status": "OK"})
+                break
+            else:
+                send_control_msg(
+                    ctrl_conn, {"status": "ERROR", "error": f"Comando desconocido: {cmd}"}
+                )
+        except (OSError, ProtocolError, ValueError) as exc:
+            try:
+                send_control_msg(ctrl_conn, {"status": "ERROR", "error": str(exc)})
+            except OSError:
+                break

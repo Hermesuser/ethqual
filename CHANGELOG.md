@@ -2,6 +2,12 @@
 
 Todos los cambios relevantes de **ethqual** se documentan en este archivo.
 
+## [0.3.0] — 2026-11-18
+### Mejorado
+- **Interfaz gráfica responsive:** `FlowLayout` adaptable, scroll vertical automático, 3 breakpoints de tarjetas KPI (1/2/4 columnas) desde `360×440`, búsqueda LAN asíncrona (`DiscoverWorker`), exclusión mutua de pruebas, auto-reset a `"Personalizado"` y persistencia de preferencias/geometría (`~/.ethqual/prefs.json`).
+- **Gestión de lote y atajos:** diálogo **Ver Lote** con eliminación por fila, botón **Deshacer última**, botón **Actualizar IPs** en Modo Servidor y atajos `Ctrl+Enter` / `Esc`.
+- **Motor y reportes:** cancelación completa en todas las fases (`cancel_event`), servidor concurrente por sesión (`Semaphore(4)`), pacing UDP híbrido, propagación explícita de errores del servidor (`_recv_ok_or_raise`), reportes HTML/etiquetas responsive y selección de gateway por menor métrica en Windows.
+
 ## [0.2.0] — 2026-11-17
 ### Añadido
 - **Icono oficial minimalista** (`ethqual/assets/icon.svg`, `.png`, `.icns`, `.ico`) integrado en ventana Qt y bundles nativos.

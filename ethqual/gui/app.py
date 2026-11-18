@@ -14,26 +14,34 @@ from pathlib import Path
 from typing import Any
 
 import psutil
-from PySide6.QtCore import QThread, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen
+from PySide6.QtCore import QPoint, QRect, QSize, QThread, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QIcon, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
+    QLayout,
+    QLayoutItem,
     QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -227,6 +235,67 @@ QCheckBox {
     spacing: 6px;
     color: #CBD5E1;
 }
+QScrollArea {
+    background-color: transparent;
+    border: none;
+}
+QScrollBar:vertical {
+    background: #0F1115;
+    width: 8px;
+    margin: 0;
+    border-radius: 4px;
+}
+QScrollBar::handle:vertical {
+    background: #2A303C;
+    min-height: 24px;
+    border-radius: 4px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #3B4455;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+QScrollBar:horizontal {
+    background: #0F1115;
+    height: 8px;
+    margin: 0;
+    border-radius: 4px;
+}
+QScrollBar::handle:horizontal {
+    background: #2A303C;
+    min-width: 24px;
+    border-radius: 4px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: #3B4455;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+}
+QTableWidget {
+    background-color: #0B0D10;
+    border: 1px solid #252A34;
+    border-radius: 8px;
+    gridline-color: #1F242E;
+    color: #E2E8F0;
+    selection-background-color: #1E3A8A;
+    selection-color: #F8FAFC;
+}
+QHeaderView::section {
+    background-color: #161920;
+    color: #94A3B8;
+    border: none;
+    border-bottom: 1px solid #252A34;
+    padding: 6px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+QTableCornerButton::section {
+    background-color: #161920;
+    border: none;
+}
 """
 
 
@@ -288,6 +357,21 @@ class ServerWorker(QThread):
     def run(self) -> None:
         beacon = ServerBeacon(tcp_port=self.port)
         beacon.start()
+        session_sem = threading.Semaphore(4)
+
+        def _serve(conn: socket.socket, addr: tuple[str, int]) -> None:
+            try:
+                self.log_line.emit(f"Sesión iniciada desde {addr[0]}:{addr[1]}")
+                with conn:
+                    handle_client_session(conn, self.iface)
+                self.log_line.emit(f"Sesión finalizada ({addr[0]}:{addr[1]})")
+            except Exception as sess_exc:  # noqa: BLE001
+                self.log_line.emit(
+                    f"[ERROR sesión {addr[0]}:{addr[1]}] {sess_exc}"
+                )
+            finally:
+                session_sem.release()
+
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
                 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -302,10 +386,11 @@ class ServerWorker(QThread):
                         conn, addr = srv.accept()
                     except socket.timeout:
                         continue
-                    self.log_line.emit(f"Sesión iniciada desde {addr[0]}:{addr[1]}")
-                    with conn:
-                        handle_client_session(conn, self.iface)
-                    self.log_line.emit(f"Sesión finalizada ({addr[0]}:{addr[1]})")
+                    session_sem.acquire()
+                    t = threading.Thread(
+                        target=_serve, args=(conn, addr), daemon=True
+                    )
+                    t.start()
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
         finally:
@@ -395,13 +480,144 @@ class WiggleWorker(QThread):
             self.finished_wiggle.emit()
 
 
+class DiscoverWorker(QThread):
+    """Hilo en segundo plano para descubrir servidores ethqual en LAN sin congelar la UI."""
+
+    discovered = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, timeout_s: float = 0.9) -> None:
+        super().__init__()
+        self.timeout_s = timeout_s
+
+    def run(self) -> None:
+        try:
+            servers = discover_servers(timeout_s=self.timeout_s)
+            self.discovered.emit(servers)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+
+class FlowLayout(QLayout):
+    """Layout adaptable que acomoda widgets en múltiples filas según el ancho disponible."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        margin: int = 0,
+        h_spacing: int = 10,
+        v_spacing: int = 8,
+    ) -> None:
+        super().__init__(parent)
+        self._items: list[QLayoutItem] = []
+        self._h_space = h_spacing
+        self._v_space = v_spacing
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    def __del__(self) -> None:
+        item = self.takeAt(0)
+        while item is not None:
+            item = self.takeAt(0)
+
+    def addItem(self, item: QLayoutItem) -> None:
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> QLayoutItem | None:
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int) -> QLayoutItem | None:
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self) -> Qt.Orientation:
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect: QRect) -> None:
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+        return size
+
+    def _do_layout(self, rect: QRect, test_only: bool) -> int:
+        margins = self.contentsMargins()
+        effective = rect.adjusted(margins.left(), margins.top(), -margins.right(), -margins.bottom())
+        x = effective.x()
+        y = effective.y()
+        line_height = 0
+
+        for item in self._items:
+            wid = item.widget()
+            if wid is not None and not wid.isVisibleTo(wid.parentWidget()):
+                continue
+            item_size = item.sizeHint()
+            next_x = x + item_size.width() + self._h_space
+            if next_x - self._h_space > effective.right() + 1 and line_height > 0:
+                x = effective.x()
+                y = y + line_height + self._v_space
+                next_x = x + item_size.width() + self._h_space
+                line_height = 0
+
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), item_size))
+
+            x = next_x
+            line_height = max(line_height, item_size.height())
+
+        return y + line_height - rect.y() + margins.bottom()
+
+
+def _field_group(label_text: str, widget: QWidget) -> QWidget:
+    """Agrupa una etiqueta y su control para que no se separen al hacer wrap."""
+    container = QWidget()
+    container.setStyleSheet("background: transparent;")
+    lay = QHBoxLayout(container)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(6)
+    lbl = QLabel(label_text)
+    lbl.setStyleSheet("background: transparent;")
+    lay.addWidget(lbl)
+    lay.addWidget(widget)
+    return container
+
+
+def _make_scrollable_page(content: QWidget) -> QScrollArea:
+    """Envuelve una página en un QScrollArea sin bordes para pantallas pequeñas."""
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    scroll.setWidget(content)
+    return scroll
+
+
 class WiggleSparkline(QWidget):
     """Gráfica temporal minimalista de estabilidad (verde = 0% pérdida, rojo = micro-corte)."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.setMinimumHeight(38)
-        self.setMaximumHeight(44)
+        self.setMinimumHeight(42)
+        self.setMaximumHeight(48)
         self._samples: list[float] = []  # pérdida % por ventana
 
     def add_sample(self, loss_pct: float) -> None:
@@ -424,7 +640,11 @@ class WiggleSparkline(QWidget):
 
         if not self._samples:
             painter.setPen(QColor("#64748B"))
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Wiggle Test inactivo (mueve conectores para probar falsos contactos)")
+            painter.drawText(
+                rect.adjusted(8, 2, -8, -2),
+                Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+                "Wiggle Test inactivo (mueve conectores para probar falsos contactos)",
+            )
             return
 
         w = max(4, (rect.width() - 16) // 48)
@@ -440,14 +660,17 @@ class WiggleSparkline(QWidget):
 def _make_kpi_card(title: str) -> tuple[QFrame, QLabel, QLabel]:
     card = QFrame()
     card.setObjectName("Card")
+    card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     layout = QVBoxLayout(card)
     layout.setContentsMargins(16, 14, 16, 14)
     layout.setSpacing(6)
 
     lbl_title = QLabel(title)
     lbl_title.setObjectName("CardTitle")
+    lbl_title.setWordWrap(True)
     lbl_val = QLabel("—")
     lbl_val.setObjectName("KpiValue")
+    lbl_val.setWordWrap(True)
     lbl_sub = QLabel("Sin datos")
     lbl_sub.setObjectName("KpiSub")
     lbl_sub.setWordWrap(True)
@@ -469,39 +692,92 @@ def _list_ipv4_interfaces() -> list[tuple[str, str]]:
 
 
 class EthqualMainWindow(QMainWindow):
-    """Ventana principal minimalista para Cliente y Servidor ethqual."""
+    """Ventana principal minimalista y responsive para Cliente y Servidor ethqual."""
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("ethqual — Diagnóstico Ethernet")
-        self.resize(960, 680)
-        self.setMinimumSize(820, 580)
+        self.resize(980, 720)
+        self.setMinimumSize(360, 440)
 
         self._last_report: dict[str, Any] | None = None
         self._autosave_path = Path.home() / ".ethqual" / "last_session.jsonl"
+        self._prefs_path = Path.home() / ".ethqual" / "prefs.json"
         self._session_reports: list[dict[str, Any]] = self._load_autosave()
         self._diag_worker: DiagnosticWorker | None = None
         self._srv_worker: ServerWorker | None = None
         self._blink_worker: BlinkWorker | None = None
         self._wiggle_worker: WiggleWorker | None = None
+        self._discover_worker: DiscoverWorker | None = None
+        self._kpi_cols: int = 0
+        self._applying_profile: bool = False
 
         root = QWidget()
         self.setCentralWidget(root)
-        main_layout = QVBoxLayout(root)
-        main_layout.setContentsMargins(24, 20, 24, 20)
-        main_layout.setSpacing(16)
+        self._main_layout = QVBoxLayout(root)
+        self._main_layout.setContentsMargins(20, 16, 20, 16)
+        self._main_layout.setSpacing(14)
 
-        main_layout.addLayout(self._build_header())
+        self._main_layout.addLayout(self._build_header())
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_client_page())
         self.stack.addWidget(self._build_server_page())
         self.stack.addWidget(self._build_guide_page())
-        main_layout.addWidget(self.stack, 1)
+        self._main_layout.addWidget(self.stack, 1)
 
-    def _build_header(self) -> QHBoxLayout:
-        header = QHBoxLayout()
-        title_box = QVBoxLayout()
+        self._load_prefs()
+        self._update_responsive_layout(self.width())
+
+        QShortcut(QKeySequence("Ctrl+Return"), self, self._start_diagnostic)
+        QShortcut(QKeySequence("Escape"), self, self._cancel_diagnostic)
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        self._load_prefs()
+        self._update_responsive_layout(self.width())
+
+        QShortcut(QKeySequence("Ctrl+Return"), self, self._start_diagnostic)
+        QShortcut(QKeySequence("Escape"), self, self._cancel_diagnostic)
+
+    def _update_responsive_layout(self, width: int) -> None:
+        """Adapta márgenes y columnas de tarjetas KPI según el ancho de la ventana."""
+        if width < 600:
+            margins = (12, 12, 12, 12)
+            spacing = 10
+            target_cols = 1
+        elif width < 1120:
+            margins = (20, 16, 20, 16)
+            spacing = 12
+            target_cols = 2
+        else:
+            margins = (24, 20, 24, 20)
+            spacing = 14
+            target_cols = 4
+
+        self._main_layout.setContentsMargins(*margins)
+        self._main_layout.setSpacing(spacing)
+
+        if target_cols != self._kpi_cols and hasattr(self, "_kpi_cards"):
+            self._kpi_cols = target_cols
+            while self._kpi_grid.count():
+                self._kpi_grid.takeAt(0)
+            for c in range(4):
+                self._kpi_grid.setColumnStretch(c, 0)
+            for idx, card in enumerate(self._kpi_cards):
+                row = idx // target_cols
+                col = idx % target_cols
+                self._kpi_grid.addWidget(card, row, col)
+            for c in range(target_cols):
+                self._kpi_grid.setColumnStretch(c, 1)
+
+    def _build_header(self) -> FlowLayout:
+        header = FlowLayout(h_spacing=12, v_spacing=8)
+
+        title_widget = QWidget()
+        title_widget.setStyleSheet("background: transparent;")
+        title_box = QVBoxLayout(title_widget)
+        title_box.setContentsMargins(0, 0, 0, 0)
         title_box.setSpacing(2)
 
         lbl_title = QLabel("ethqual")
@@ -510,11 +786,13 @@ class EthqualMainWindow(QMainWindow):
             f"Cualificación de enlaces Ethernet · {platform.system()} ({platform.machine()})"
         )
         lbl_sub.setObjectName("Subtitle")
+        lbl_sub.setWordWrap(True)
         title_box.addWidget(lbl_title)
         title_box.addWidget(lbl_sub)
 
         seg_frame = QFrame()
         seg_frame.setObjectName("SegContainer")
+        seg_frame.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         seg_layout = QHBoxLayout(seg_frame)
         seg_layout.setContentsMargins(2, 2, 2, 2)
         seg_layout.setSpacing(2)
@@ -540,8 +818,7 @@ class EthqualMainWindow(QMainWindow):
         seg_layout.addWidget(self.btn_mode_server)
         seg_layout.addWidget(self.btn_mode_guide)
 
-        header.addLayout(title_box)
-        header.addStretch(1)
+        header.addWidget(title_widget)
         header.addWidget(seg_frame)
         return header
 
@@ -550,22 +827,24 @@ class EthqualMainWindow(QMainWindow):
         self.btn_mode_server.setChecked(idx == 1)
         self.btn_mode_guide.setChecked(idx == 2)
         self.stack.setCurrentIndex(idx)
+        if idx == 1:
+            self._refresh_server_interfaces()
 
-    def _build_client_page(self) -> QWidget:
+    def _build_client_page(self) -> QScrollArea:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(0, 0, 4, 0)
         layout.setSpacing(14)
 
         ctrl_card = QFrame()
         ctrl_card.setObjectName("Card")
         ctrl_layout = QVBoxLayout(ctrl_card)
-        ctrl_layout.setContentsMargins(16, 14, 16, 14)
+        ctrl_layout.setContentsMargins(14, 12, 14, 12)
         ctrl_layout.setSpacing(10)
 
-        row1 = QHBoxLayout()
-        row1.setSpacing(10)
+        row1 = FlowLayout(h_spacing=10, v_spacing=8)
         self.in_server_ip = QLineEdit("127.0.0.1")
+        self.in_server_ip.setMinimumWidth(140)
         self.in_server_ip.setPlaceholderText("IP del servidor (ej. 192.168.50.20)")
         self.in_port = QSpinBox()
         self.in_port.setRange(1, 65535)
@@ -592,7 +871,10 @@ class EthqualMainWindow(QMainWindow):
         self.btn_discover.clicked.connect(self._discover_lan_servers)
 
         self.in_discovered_servers = QComboBox()
-        self.in_discovered_servers.setMinimumWidth(140)
+        self.in_discovered_servers.setMinimumWidth(150)
+        self.in_discovered_servers.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
         self.in_discovered_servers.addItem("Servidores LAN...", None)
         self.in_discovered_servers.currentIndexChanged.connect(self._on_discovered_selected)
 
@@ -604,23 +886,18 @@ class EthqualMainWindow(QMainWindow):
         self.btn_wiggle.setToolTip("Monitor en vivo con gráfica y alerta sonora para detectar falsos contactos al mover el cable")
         self.btn_wiggle.clicked.connect(self._toggle_wiggle)
 
-        row1.addWidget(QLabel("Servidor:"))
-        row1.addWidget(self.in_server_ip, 2)
+        row1.addWidget(_field_group("Servidor:", self.in_server_ip))
         row1.addWidget(self.btn_discover)
         row1.addWidget(self.in_discovered_servers)
-        row1.addWidget(QLabel("Puerto:"))
-        row1.addWidget(self.in_port)
-        row1.addWidget(QLabel("Duración:"))
-        row1.addWidget(self.in_duration)
-        row1.addWidget(QLabel("Flujos:"))
-        row1.addWidget(self.in_streams)
+        row1.addWidget(_field_group("Puerto:", self.in_port))
+        row1.addWidget(_field_group("Duración:", self.in_duration))
+        row1.addWidget(_field_group("Flujos:", self.in_streams))
         row1.addWidget(self.btn_blink)
         row1.addWidget(self.btn_wiggle)
         row1.addWidget(self.btn_run)
         row1.addWidget(self.btn_cancel)
 
-        row2 = QHBoxLayout()
-        row2.setSpacing(14)
+        row2 = FlowLayout(h_spacing=12, v_spacing=8)
         self.in_expected_speed = QComboBox()
         self.in_expected_speed.addItems(["1000", "2500", "100", "10"])
         self.in_min_tp = QDoubleSpinBox()
@@ -637,30 +914,36 @@ class EthqualMainWindow(QMainWindow):
         self.in_soak_rounds.setValue(1)
         self.in_soak_rounds.setToolTip("Rondas Soak Test (>1 ejecuta estabilidad prolongada cada 10 s)")
 
-        row2.addWidget(QLabel("Enlace (Mbps):"))
-        row2.addWidget(self.in_expected_speed)
-        row2.addWidget(QLabel("Mín. Mbps:"))
-        row2.addWidget(self.in_min_tp)
+        row2.addWidget(_field_group("Enlace (Mbps):", self.in_expected_speed))
+        row2.addWidget(_field_group("Mín. Mbps:", self.in_min_tp))
         row2.addWidget(self.chk_reverse)
         row2.addWidget(self.chk_duplex)
         row2.addWidget(self.chk_udp)
         row2.addWidget(self.chk_udp_sweep)
         row2.addWidget(self.chk_dhcp)
-        row2.addWidget(QLabel("Soak:"))
-        row2.addWidget(self.in_soak_rounds)
-        row2.addStretch(1)
+        row2.addWidget(_field_group("Soak:", self.in_soak_rounds))
 
-        row0 = QHBoxLayout()
-        row0.setSpacing(10)
+        row0 = FlowLayout(h_spacing=10, v_spacing=8)
         self.in_project = QLineEdit("Proyecto Obra")
+        self.in_project.setMinimumWidth(140)
         self.in_cable_id = QLineEdit("TOMA-01")
+        self.in_cable_id.setMinimumWidth(100)
         self.in_technician = QLineEdit()
+        self.in_technician.setMinimumWidth(110)
         self.in_technician.setPlaceholderText("Técnico")
         self.in_profile = QComboBox()
+        self.in_profile.setMinimumWidth(130)
         self.in_profile.addItem("Personalizado")
         for name in PRESET_PROFILES:
             self.in_profile.addItem(name)
         self.in_profile.currentTextChanged.connect(self._apply_profile)
+        self.in_expected_speed.currentIndexChanged.connect(self._mark_profile_custom)
+        self.in_min_tp.valueChanged.connect(self._mark_profile_custom)
+        self.in_streams.valueChanged.connect(self._mark_profile_custom)
+        self.chk_reverse.toggled.connect(self._mark_profile_custom)
+        self.chk_duplex.toggled.connect(self._mark_profile_custom)
+        self.chk_udp.toggled.connect(self._mark_profile_custom)
+        self.chk_udp_sweep.toggled.connect(self._mark_profile_custom)
 
         self.in_project.setToolTip("Nombre de la obra o sitio para agrupar el reporte HTML")
         self.in_cable_id.setToolTip("Identificador único de la toma o patch panel (ej. P1-R2-08)")
@@ -670,14 +953,10 @@ class EthqualMainWindow(QMainWindow):
         self.chk_duplex.setToolTip("Transmite y recibe simultáneamente para detectar diafonía (NEXT)")
         self.chk_udp_sweep.setToolTip("Barrido de tramas UDP (36B, 256B, 1400B) a distintas tasas PPS")
 
-        row0.addWidget(QLabel("Proyecto:"))
-        row0.addWidget(self.in_project, 2)
-        row0.addWidget(QLabel("ID Toma:"))
-        row0.addWidget(self.in_cable_id, 1)
-        row0.addWidget(QLabel("Técnico:"))
-        row0.addWidget(self.in_technician, 1)
-        row0.addWidget(QLabel("Perfil:"))
-        row0.addWidget(self.in_profile, 1)
+        row0.addWidget(_field_group("Proyecto:", self.in_project))
+        row0.addWidget(_field_group("ID Toma:", self.in_cable_id))
+        row0.addWidget(_field_group("Técnico:", self.in_technician))
+        row0.addWidget(_field_group("Perfil:", self.in_profile))
 
         ctrl_layout.addLayout(row0)
         ctrl_layout.addLayout(row1)
@@ -687,8 +966,7 @@ class EthqualMainWindow(QMainWindow):
         # Stepper visual + barra de progreso
         prog_box = QVBoxLayout()
         prog_box.setSpacing(6)
-        stepper_row = QHBoxLayout()
-        stepper_row.setSpacing(8)
+        stepper_row = FlowLayout(h_spacing=6, v_spacing=6)
         self._step_pills: list[QLabel] = []
         for label in ("1. L2 / ICMP", "2. Handshake", "3. Carga TCP", "4. BER / UDP", "5. NIC / AutoTest"):
             pill = QLabel(label)
@@ -696,10 +974,10 @@ class EthqualMainWindow(QMainWindow):
             pill.setProperty("state", "idle")
             stepper_row.addWidget(pill)
             self._step_pills.append(pill)
-        stepper_row.addStretch(1)
 
         self.lbl_progress = QLabel("Listo para iniciar diagnóstico.")
         self.lbl_progress.setObjectName("Subtitle")
+        self.lbl_progress.setWordWrap(True)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
@@ -716,6 +994,7 @@ class EthqualMainWindow(QMainWindow):
         v_layout.setSpacing(4)
         self.lbl_verdict = QLabel("ESPERANDO EJECUCIÓN")
         self.lbl_verdict.setFont(QFont("", 16, QFont.Weight.Bold))
+        self.lbl_verdict.setWordWrap(True)
         self.lbl_verdict_detail = QLabel(
             "Conecta el equipo remoto en Modo Servidor e inicia la prueba."
         )
@@ -725,18 +1004,15 @@ class EthqualMainWindow(QMainWindow):
         v_layout.addWidget(self.lbl_verdict_detail)
         layout.addWidget(self.verdict_card)
 
-        grid = QGridLayout()
-        grid.setSpacing(12)
+        self._kpi_grid = QGridLayout()
+        self._kpi_grid.setSpacing(12)
         c_tp, self.kpi_tp_val, self.kpi_tp_sub = _make_kpi_card("Rendimiento TCP")
         c_l2, self.kpi_l2_val, self.kpi_l2_sub = _make_kpi_card("Conectividad y Capa 2")
         c_ber, self.kpi_ber_val, self.kpi_ber_sub = _make_kpi_card("Integridad y UDP")
         c_phy, self.kpi_phy_val, self.kpi_phy_sub = _make_kpi_card("Enlace Físico (PHY)")
 
-        grid.addWidget(c_tp, 0, 0)
-        grid.addWidget(c_l2, 0, 1)
-        grid.addWidget(c_ber, 1, 0)
-        grid.addWidget(c_phy, 1, 1)
-        layout.addLayout(grid, 1)
+        self._kpi_cards = [c_tp, c_l2, c_ber, c_phy]
+        layout.addLayout(self._kpi_grid, 1)
 
         self.wiggle_chart = WiggleSparkline()
         layout.addWidget(self.wiggle_chart)
@@ -744,20 +1020,24 @@ class EthqualMainWindow(QMainWindow):
         # Registro de errores, eventos y remediales sugeridos
         self.client_log = QPlainTextEdit()
         self.client_log.setReadOnly(True)
-        self.client_log.setMaximumHeight(115)
+        self.client_log.setMinimumHeight(90)
+        self.client_log.setMaximumHeight(160)
         self.client_log.setPlaceholderText(
             "Registro de ejecución, errores y acciones remediales sugeridas..."
         )
         layout.addWidget(self.client_log)
 
-        footer = QHBoxLayout()
+        footer = FlowLayout(h_spacing=8, v_spacing=8)
         self.lbl_batch = QLabel(f"Lote actual: {len(self._session_reports)} toma(s)")
         self.lbl_batch.setObjectName("Subtitle")
+        self.btn_view_batch = QPushButton("Ver Lote")
+        self.btn_view_batch.setEnabled(bool(self._session_reports))
+        self.btn_view_batch.clicked.connect(self._show_batch_dialog)
+        self.btn_undo_batch = QPushButton("Deshacer última")
+        self.btn_undo_batch.setEnabled(bool(self._session_reports))
+        self.btn_undo_batch.clicked.connect(self._undo_last_batch)
         self.btn_clear_batch = QPushButton("Limpiar Lote")
         self.btn_clear_batch.clicked.connect(self._clear_batch)
-        footer.addWidget(self.lbl_batch)
-        footer.addWidget(self.btn_clear_batch)
-        footer.addStretch(1)
         self.btn_export_json = QPushButton("Exportar reporte.json")
         self.btn_export_json.setEnabled(False)
         self.btn_export_json.clicked.connect(self._export_json)
@@ -770,34 +1050,43 @@ class EthqualMainWindow(QMainWindow):
         self.btn_export_labels = QPushButton("Etiquetas Patch Panel")
         self.btn_export_labels.setEnabled(bool(self._session_reports))
         self.btn_export_labels.clicked.connect(self._export_labels)
+
+        footer.addWidget(self.lbl_batch)
+        footer.addWidget(self.btn_view_batch)
+        footer.addWidget(self.btn_undo_batch)
+        footer.addWidget(self.btn_clear_batch)
         footer.addWidget(self.btn_export_json)
         footer.addWidget(self.btn_export_md)
         footer.addWidget(self.btn_export_html)
         footer.addWidget(self.btn_export_labels)
         layout.addLayout(footer)
 
-        return page
+        return _make_scrollable_page(page)
 
-    def _build_server_page(self) -> QWidget:
+    def _build_server_page(self) -> QScrollArea:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(0, 0, 4, 0)
         layout.setSpacing(14)
 
         card = QFrame()
         card.setObjectName("Card")
         c_layout = QVBoxLayout(card)
-        c_layout.setContentsMargins(16, 14, 16, 14)
+        c_layout.setContentsMargins(14, 12, 14, 12)
         c_layout.setSpacing(10)
 
-        row = QHBoxLayout()
-        row.setSpacing(10)
+        row = FlowLayout(h_spacing=10, v_spacing=8)
         self.in_srv_host = QLineEdit("0.0.0.0")
+        self.in_srv_host.setMinimumWidth(110)
         self.in_srv_port = QSpinBox()
         self.in_srv_port.setRange(1, 65535)
         self.in_srv_port.setValue(5000)
 
         self.in_srv_iface = QComboBox()
+        self.in_srv_iface.setMinimumWidth(160)
+        self.in_srv_iface.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
         self.in_srv_iface.addItem("Auto-detectar", None)
         for iface, ip in _list_ipv4_interfaces():
             self.in_srv_iface.addItem(f"{iface} ({ip})", iface)
@@ -806,23 +1095,23 @@ class EthqualMainWindow(QMainWindow):
         self.btn_srv_toggle.setObjectName("PrimaryBtn")
         self.btn_srv_toggle.clicked.connect(self._toggle_server)
 
-        row.addWidget(QLabel("Escucha:"))
-        row.addWidget(self.in_srv_host)
-        row.addWidget(QLabel("Puerto:"))
-        row.addWidget(self.in_srv_port)
-        row.addWidget(QLabel("Interfaz:"))
-        row.addWidget(self.in_srv_iface, 1)
+        row.addWidget(_field_group("Escucha:", self.in_srv_host))
+        row.addWidget(_field_group("Puerto:", self.in_srv_port))
+        row.addWidget(_field_group("Interfaz:", self.in_srv_iface))
         row.addWidget(self.btn_srv_toggle)
 
-        ips = ", ".join(f"{iface}: {ip}" for iface, ip in _list_ipv4_interfaces()) or "Solo loopback (127.0.0.1)"
-        ip_row = QHBoxLayout()
-        lbl_ips = QLabel(f"IPs locales detectadas: {ips}")
-        lbl_ips.setObjectName("Subtitle")
+        ip_row = FlowLayout(h_spacing=10, v_spacing=6)
+        self.lbl_srv_ips = QLabel()
+        self.lbl_srv_ips.setObjectName("Subtitle")
+        self.lbl_srv_ips.setWordWrap(True)
+        btn_refresh_ip = QPushButton("Actualizar IPs")
+        btn_refresh_ip.clicked.connect(self._refresh_server_interfaces)
         btn_copy_ip = QPushButton("Copiar IP")
-        btn_copy_ip.setFixedWidth(96)
         btn_copy_ip.clicked.connect(self._copy_first_local_ip)
-        ip_row.addWidget(lbl_ips, 1)
+        ip_row.addWidget(self.lbl_srv_ips)
+        ip_row.addWidget(btn_refresh_ip)
         ip_row.addWidget(btn_copy_ip)
+        self._refresh_server_interfaces()
 
         c_layout.addLayout(row)
         c_layout.addLayout(ip_row)
@@ -830,9 +1119,10 @@ class EthqualMainWindow(QMainWindow):
 
         self.srv_log = QPlainTextEdit()
         self.srv_log.setReadOnly(True)
+        self.srv_log.setMinimumHeight(180)
         self.srv_log.setPlaceholderText("El registro de sesiones aparecerá aquí...")
         layout.addWidget(self.srv_log, 1)
-        return page
+        return _make_scrollable_page(page)
 
     def _build_guide_page(self) -> QWidget:
         page = QWidget()
@@ -867,17 +1157,81 @@ class EthqualMainWindow(QMainWindow):
         preset = PRESET_PROFILES.get(name)
         if not preset:
             return
-        self.in_expected_speed.setCurrentText(str(preset["expected_speed_mbps"]))
-        self.in_min_tp.setValue(float(preset["min_throughput_mbps"]))
-        self.in_streams.setValue(int(preset["streams"]))
-        self.chk_reverse.setChecked(bool(preset["reverse"]))
-        self.chk_duplex.setChecked(bool(preset["full_duplex"]))
-        self.chk_udp.setChecked(bool(preset["udp_jitter"]))
-        self.chk_udp_sweep.setChecked(bool(preset["udp_sweep"]))
+        self._applying_profile = True
+        try:
+            self.in_expected_speed.setCurrentText(str(preset["expected_speed_mbps"]))
+            self.in_min_tp.setValue(float(preset["min_throughput_mbps"]))
+            self.in_streams.setValue(int(preset["streams"]))
+            self.chk_reverse.setChecked(bool(preset["reverse"]))
+            self.chk_duplex.setChecked(bool(preset["full_duplex"]))
+            self.chk_udp.setChecked(bool(preset["udp_jitter"]))
+            self.chk_udp_sweep.setChecked(bool(preset["udp_sweep"]))
+        finally:
+            self._applying_profile = False
+
+    def _mark_profile_custom(self) -> None:
+        if self._applying_profile:
+            return
+        if self.in_profile.currentText() != "Personalizado":
+            self.in_profile.blockSignals(True)
+            self.in_profile.setCurrentText("Personalizado")
+            self.in_profile.blockSignals(False)
+
+    def _refresh_server_interfaces(self) -> None:
+        if not hasattr(self, "in_srv_iface"):
+            return
+        prev_data = self.in_srv_iface.currentData()
+        ifaces = _list_ipv4_interfaces()
+        self.in_srv_iface.blockSignals(True)
+        self.in_srv_iface.clear()
+        self.in_srv_iface.addItem("Auto-detectar", None)
+        for iface, ip in ifaces:
+            self.in_srv_iface.addItem(f"{iface} ({ip})", iface)
+        if prev_data is not None:
+            idx = self.in_srv_iface.findData(prev_data)
+            if idx >= 0:
+                self.in_srv_iface.setCurrentIndex(idx)
+        self.in_srv_iface.blockSignals(False)
+        ips = ", ".join(f"{iface}: {ip}" for iface, ip in ifaces) or "Solo loopback (127.0.0.1)"
+        self.lbl_srv_ips.setText(f"IPs locales detectadas: {ips}")
+
+    def _set_test_buttons_busy(self, active_mode: str | None) -> None:
+        """Garantiza exclusión mutua entre Diagnóstico, Wiggle Test y Blink Puerto."""
+        if active_mode is None:
+            self.btn_run.setEnabled(True)
+            self.btn_cancel.setEnabled(False)
+            self.btn_wiggle.setEnabled(True)
+            self.btn_blink.setEnabled(True)
+        elif active_mode == "diag":
+            self.btn_run.setEnabled(False)
+            self.btn_cancel.setEnabled(True)
+            self.btn_wiggle.setEnabled(False)
+            self.btn_blink.setEnabled(False)
+        elif active_mode == "wiggle":
+            self.btn_run.setEnabled(False)
+            self.btn_cancel.setEnabled(False)
+            self.btn_wiggle.setEnabled(True)
+            self.btn_blink.setEnabled(False)
+        elif active_mode == "blink":
+            self.btn_run.setEnabled(False)
+            self.btn_cancel.setEnabled(False)
+            self.btn_wiggle.setEnabled(False)
+            self.btn_blink.setEnabled(True)
 
     def _discover_lan_servers(self) -> None:
+        if self._discover_worker and self._discover_worker.isRunning():
+            return
+        self.btn_discover.setEnabled(False)
+        self.btn_discover.setText("Buscando...")
         self.client_log.appendPlainText("Buscando servidores ethqual en la red local...")
-        servers = discover_servers(timeout_s=0.9)
+        self._discover_worker = DiscoverWorker(timeout_s=0.9)
+        self._discover_worker.discovered.connect(self._on_discover_finished)
+        self._discover_worker.failed.connect(self._on_discover_failed)
+        self._discover_worker.start()
+
+    def _on_discover_finished(self, servers: list[dict[str, Any]]) -> None:
+        self.btn_discover.setEnabled(True)
+        self.btn_discover.setText("Buscar LAN")
         self.in_discovered_servers.blockSignals(True)
         self.in_discovered_servers.clear()
         if not servers:
@@ -895,6 +1249,11 @@ class EthqualMainWindow(QMainWindow):
                 f"Servidor detectado: {s['hostname']} ({s['os']}) -> {s['ip']}:{s['port']}"
             )
 
+    def _on_discover_failed(self, err: str) -> None:
+        self.btn_discover.setEnabled(True)
+        self.btn_discover.setText("Buscar LAN")
+        self.client_log.appendPlainText(f"[ERROR LAN] {err}")
+
     def _on_discovered_selected(self, idx: int) -> None:
         data = self.in_discovered_servers.itemData(idx)
         if isinstance(data, dict):
@@ -908,6 +1267,7 @@ class EthqualMainWindow(QMainWindow):
         target = self.in_server_ip.text().strip()
         if not target:
             return
+        self._set_test_buttons_busy("blink")
         self.btn_blink.setText("Detener Blink")
         self.client_log.appendPlainText(f"Port Blink activo hacia {target} (8 s)...")
         self._blink_worker = BlinkWorker(target, duration_s=8)
@@ -916,6 +1276,7 @@ class EthqualMainWindow(QMainWindow):
 
     def _on_blink_finished(self) -> None:
         self.btn_blink.setText("Blink Puerto")
+        self._set_test_buttons_busy(None)
         self.client_log.appendPlainText("Port Blink finalizado.")
 
     def _toggle_wiggle(self) -> None:
@@ -926,6 +1287,7 @@ class EthqualMainWindow(QMainWindow):
         server_ip = self.in_server_ip.text().strip()
         if not server_ip:
             return
+        self._set_test_buttons_busy("wiggle")
         self.wiggle_chart.clear_samples()
         self.btn_wiggle.setText("Detener Wiggle")
         self.btn_wiggle.setObjectName("DangerBtn")
@@ -951,7 +1313,7 @@ class EthqualMainWindow(QMainWindow):
             )
 
     def _on_wiggle_finished(self) -> None:
-        self.btn_wiggle.setEnabled(True)
+        self._set_test_buttons_busy(None)
         self.btn_wiggle.setText("Wiggle Test")
         self.btn_wiggle.setObjectName("")
         self.btn_wiggle.style().unpolish(self.btn_wiggle)
@@ -979,6 +1341,8 @@ class EthqualMainWindow(QMainWindow):
             pill.style().polish(pill)
 
     def _start_diagnostic(self) -> None:
+        if not self.btn_run.isEnabled():
+            return
         server_ip = self.in_server_ip.text().strip()
         if not server_ip:
             QMessageBox.warning(self, "Dato requerido", "Ingresa la IP del servidor.")
@@ -1007,8 +1371,7 @@ class EthqualMainWindow(QMainWindow):
             expected_speed_mbps=int(self.in_expected_speed.currentText()),
             min_throughput_mbps=self.in_min_tp.value(),
         )
-        self.btn_run.setEnabled(False)
-        self.btn_cancel.setEnabled(True)
+        self._set_test_buttons_busy("diag")
         self.btn_export_json.setEnabled(False)
         self.btn_export_md.setEnabled(False)
         self.progress_bar.setValue(5)
@@ -1068,16 +1431,115 @@ class EthqualMainWindow(QMainWindow):
         except OSError:
             pass
 
+    def _rewrite_autosave(self) -> None:
+        try:
+            if not self._session_reports:
+                if self._autosave_path.exists():
+                    self._autosave_path.unlink()
+                return
+            self._autosave_path.parent.mkdir(parents=True, exist_ok=True)
+            lines = [json.dumps(r, ensure_ascii=False) for r in self._session_reports]
+            self._autosave_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
+    def _show_batch_dialog(self) -> None:
+        if not self._session_reports:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Tomas en el lote actual ({len(self._session_reports)})")
+        dlg.resize(760, 420)
+        dlg.setMinimumSize(340, 260)
+        v_lay = QVBoxLayout(dlg)
+
+        table = QTableWidget(len(self._session_reports), 6, dlg)
+        table.setHorizontalHeaderLabels(
+            ["ID Toma", "Proyecto", "Veredicto", "Throughput", "PHY (C/S)", "RTT / Pérdida"]
+        )
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+
+        verdict_colors = {
+            "APROBADO": QColor("#10B981"),
+            "ADVERTENCIA": QColor("#F59E0B"),
+            "FALLO": QColor("#EF4444"),
+        }
+        for row_idx, rep in enumerate(self._session_reports):
+            meta = rep.get("metadata", {})
+            tests = rep.get("tests", {})
+            tp = tests.get("throughput", {}).get("server_rx", {}).get("throughput_mbps", 0.0)
+            conn = tests.get("connectivity_layer2", {})
+            phy_c = rep.get("phy_link_diagnosis", {}).get("client", {}).get("link_info", {}).get("speed_mbps", "—")
+            phy_s = rep.get("phy_link_diagnosis", {}).get("server", {}).get("link_info", {}).get("speed_mbps", "—")
+            verdict = str(rep.get("verdict") or "")
+            vals = [
+                str(meta.get("cable_id") or f"TOMA-{row_idx + 1}"),
+                str(meta.get("project_name") or ""),
+                verdict,
+                f"{tp} Mbps",
+                f"{phy_c} / {phy_s} Mbps",
+                f"{conn.get('rtt_avg_ms', '—')} ms ({conn.get('packet_loss_pct', 0)}%)",
+            ]
+            for col_idx, txt in enumerate(vals):
+                item = QTableWidgetItem(txt)
+                if col_idx == 2 and verdict in verdict_colors:
+                    item.setForeground(verdict_colors[verdict])
+                table.setItem(row_idx, col_idx, item)
+
+        v_lay.addWidget(table)
+        btn_row = QHBoxLayout()
+        btn_del = QPushButton("Eliminar seleccionada", dlg)
+        btn_del.setObjectName("DangerBtn")
+
+        def _delete_selected() -> None:
+            row = table.currentRow()
+            if row < 0 or row >= len(self._session_reports):
+                return
+            removed = self._session_reports.pop(row)
+            table.removeRow(row)
+            count = len(self._session_reports)
+            self.lbl_batch.setText(f"Lote actual: {count} toma(s)")
+            self.btn_view_batch.setEnabled(bool(count))
+            self.btn_undo_batch.setEnabled(bool(count))
+            self.btn_export_html.setEnabled(bool(count))
+            self.btn_export_labels.setEnabled(bool(count))
+            self._rewrite_autosave()
+            cid = removed.get("metadata", {}).get("cable_id", "toma")
+            self.client_log.appendPlainText(f"Se eliminó '{cid}' del lote actual.")
+            dlg.setWindowTitle(f"Tomas en el lote actual ({count})")
+
+        btn_del.clicked.connect(_delete_selected)
+        btn_close = QPushButton("Cerrar", dlg)
+        btn_close.clicked.connect(dlg.accept)
+        btn_row.addWidget(btn_del)
+        btn_row.addStretch(1)
+        btn_row.addWidget(btn_close)
+        v_lay.addLayout(btn_row)
+        dlg.exec()
+
+    def _undo_last_batch(self) -> None:
+        if not self._session_reports:
+            return
+        removed = self._session_reports.pop()
+        cable_id = removed.get("metadata", {}).get("cable_id", "toma")
+        count = len(self._session_reports)
+        self.lbl_batch.setText(f"Lote actual: {count} toma(s)")
+        self.btn_view_batch.setEnabled(bool(count))
+        self.btn_undo_batch.setEnabled(bool(count))
+        self.btn_export_html.setEnabled(bool(count))
+        self.btn_export_labels.setEnabled(bool(count))
+        self._rewrite_autosave()
+        self.client_log.appendPlainText(f"Se eliminó '{cable_id}' del lote actual.")
+
     def _clear_batch(self) -> None:
         self._session_reports.clear()
         self.lbl_batch.setText("Lote actual: 0 toma(s)")
+        self.btn_view_batch.setEnabled(False)
+        self.btn_undo_batch.setEnabled(False)
         self.btn_export_html.setEnabled(False)
         self.btn_export_labels.setEnabled(False)
-        try:
-            if self._autosave_path.exists():
-                self._autosave_path.unlink()
-        except OSError:
-            pass
+        self._rewrite_autosave()
 
     def _increment_cable_id(self) -> None:
         cur = self.in_cable_id.text().strip()
@@ -1099,8 +1561,9 @@ class EthqualMainWindow(QMainWindow):
         self._append_autosave(report)
         self._increment_cable_id()
         self.lbl_batch.setText(f"Lote actual: {len(self._session_reports)} toma(s)")
-        self.btn_run.setEnabled(True)
-        self.btn_cancel.setEnabled(False)
+        self._set_test_buttons_busy(None)
+        self.btn_view_batch.setEnabled(True)
+        self.btn_undo_batch.setEnabled(True)
         self.btn_export_json.setEnabled(True)
         self.btn_export_md.setEnabled(True)
         self.btn_export_html.setEnabled(True)
@@ -1195,8 +1658,7 @@ class EthqualMainWindow(QMainWindow):
             self.client_log.appendPlainText("Sin hallazgos: el enlace cumple todos los umbrales.")
 
     def _on_diag_failed(self, err: str) -> None:
-        self.btn_run.setEnabled(True)
-        self.btn_cancel.setEnabled(False)
+        self._set_test_buttons_busy(None)
         self.progress_bar.setValue(0)
         self.lbl_progress.setText("Error durante la ejecución.")
         self._set_step_state(0, failed=True)
@@ -1212,11 +1674,16 @@ class EthqualMainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(
             self, "Guardar reporte JSON", "reporte.json", "JSON (*.json)"
         )
-        if path:
+        if not path:
+            return
+        try:
             Path(path).write_text(
                 json.dumps(self._last_report, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
+            self.client_log.appendPlainText(f"Reporte JSON exportado: {path}")
+        except OSError as exc:
+            QMessageBox.critical(self, "Error al exportar JSON", str(exc))
 
     def _export_md(self) -> None:
         if not self._last_report:
@@ -1224,8 +1691,13 @@ class EthqualMainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(
             self, "Exportar resumen Markdown", "resumen.md", "Markdown (*.md)"
         )
-        if path:
+        if not path:
+            return
+        try:
             write_markdown_summary(path, self._last_report)
+            self.client_log.appendPlainText(f"Resumen Markdown exportado: {path}")
+        except OSError as exc:
+            QMessageBox.critical(self, "Error al exportar Markdown", str(exc))
 
     def _export_html(self) -> None:
         if not self._session_reports:
@@ -1233,8 +1705,13 @@ class EthqualMainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(
             self, "Exportar Reporte HTML de Obra", "reporte_obra.html", "HTML (*.html)"
         )
-        if path:
+        if not path:
+            return
+        try:
             write_html_report(path, self._session_reports)
+            self.client_log.appendPlainText(f"Reporte HTML de obra exportado: {path}")
+        except OSError as exc:
+            QMessageBox.critical(self, "Error al exportar HTML", str(exc))
 
     def _export_labels(self) -> None:
         if not self._session_reports:
@@ -1247,10 +1724,14 @@ class EthqualMainWindow(QMainWindow):
         )
         if not path:
             return
-        if path.lower().endswith(".csv") or "CSV" in selected_filter:
-            write_labels_csv(path, self._session_reports)
-        else:
-            write_labels_html(path, self._session_reports)
+        try:
+            if path.lower().endswith(".csv") or "CSV" in selected_filter:
+                write_labels_csv(path, self._session_reports)
+            else:
+                write_labels_html(path, self._session_reports)
+            self.client_log.appendPlainText(f"Etiquetas exportadas: {path}")
+        except OSError as exc:
+            QMessageBox.critical(self, "Error al exportar etiquetas", str(exc))
 
     def _toggle_server(self) -> None:
         if self._srv_worker and self._srv_worker.isRunning():
@@ -1283,7 +1764,64 @@ class EthqualMainWindow(QMainWindow):
         self.btn_srv_toggle.style().polish(self.btn_srv_toggle)
         self.srv_log.appendPlainText("Servidor detenido.")
 
+    def _load_prefs(self) -> None:
+        if not self._prefs_path.exists():
+            return
+        try:
+            data = json.loads(self._prefs_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(data, dict):
+            return
+        if isinstance(data.get("project"), str) and data["project"]:
+            self.in_project.setText(data["project"])
+        if isinstance(data.get("technician"), str):
+            self.in_technician.setText(data["technician"])
+        if isinstance(data.get("server_ip"), str) and data["server_ip"]:
+            self.in_server_ip.setText(data["server_ip"])
+        if isinstance(data.get("port"), int) and 1 <= data["port"] <= 65535:
+            self.in_port.setValue(data["port"])
+        if isinstance(data.get("profile"), str):
+            idx = self.in_profile.findText(data["profile"])
+            if idx >= 0:
+                self.in_profile.setCurrentIndex(idx)
+        win_w = data.get("window_w")
+        win_h = data.get("window_h")
+        if isinstance(win_w, int) and isinstance(win_h, int) and win_w >= 360 and win_h >= 440:
+            self.resize(win_w, win_h)
+
+    def _save_prefs(self) -> None:
+        payload = {
+            "project": self.in_project.text().strip(),
+            "technician": self.in_technician.text().strip(),
+            "server_ip": self.in_server_ip.text().strip(),
+            "port": self.in_port.value(),
+            "profile": self.in_profile.currentText(),
+            "window_w": self.width(),
+            "window_h": self.height(),
+        }
+        try:
+            self._prefs_path.parent.mkdir(parents=True, exist_ok=True)
+            self._prefs_path.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
     def closeEvent(self, event: Any) -> None:
+        self._save_prefs()
+        if self._diag_worker and self._diag_worker.isRunning():
+            self._diag_worker.request_cancel()
+            self._diag_worker.wait(1000)
+        if self._wiggle_worker and self._wiggle_worker.isRunning():
+            self._wiggle_worker.request_stop()
+            self._wiggle_worker.wait(1000)
+        if self._blink_worker and self._blink_worker.isRunning():
+            self._blink_worker.cancel_event.set()
+            self._blink_worker.wait(500)
+        if self._discover_worker and self._discover_worker.isRunning():
+            self._discover_worker.wait(500)
         if self._srv_worker and self._srv_worker.isRunning():
             self._srv_worker.request_stop()
             self._srv_worker.wait(1500)
@@ -1324,7 +1862,7 @@ def main() -> None:
     _setup_windowed_logging()
     app = QApplication(sys.argv)
     app.setApplicationName("ethqual")
-    app.setApplicationVersion("0.2.0")
+    app.setApplicationVersion("0.3.0")
     icon_path = _resolve_icon_path()
     if icon_path is not None:
         app.setWindowIcon(QIcon(str(icon_path)))

@@ -5,9 +5,24 @@ from __future__ import annotations
 import argparse
 import platform
 import socket
+import threading
 
 from ethqual.core.discovery import ServerBeacon
 from ethqual.core.server_engine import handle_client_session
+
+
+def _serve_client(
+    conn: socket.socket, addr: tuple[str, int], iface: str | None, sem: threading.Semaphore
+) -> None:
+    try:
+        print(f"[ethqual-server] Sesión iniciada desde {addr[0]}:{addr[1]}")
+        with conn:
+            handle_client_session(conn, iface)
+        print(f"[ethqual-server] Sesión finalizada ({addr[0]}:{addr[1]})")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ethqual-server] Error en sesión ({addr[0]}:{addr[1]}): {exc}")
+    finally:
+        sem.release()
 
 
 def main() -> None:
@@ -19,6 +34,7 @@ def main() -> None:
 
     beacon = ServerBeacon(tcp_port=args.port)
     beacon.start()
+    session_sem = threading.Semaphore(4)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind((args.host, args.port))
@@ -27,10 +43,13 @@ def main() -> None:
         try:
             while True:
                 conn, addr = srv.accept()
-                print(f"[ethqual-server] Sesión iniciada desde {addr[0]}:{addr[1]}")
-                with conn:
-                    handle_client_session(conn, args.iface)
-                print(f"[ethqual-server] Sesión finalizada ({addr[0]}:{addr[1]})")
+                session_sem.acquire()
+                t = threading.Thread(
+                    target=_serve_client,
+                    args=(conn, addr, args.iface, session_sem),
+                    daemon=True,
+                )
+                t.start()
         except KeyboardInterrupt:
             print("\n[ethqual-server] Detenido por el usuario.")
         finally:

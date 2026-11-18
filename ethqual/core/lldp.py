@@ -9,6 +9,8 @@ import shutil
 import subprocess
 from typing import Any
 
+from ethqual.core.metrics import no_window_kwargs
+
 
 def get_lldp_neighbor(iface: str | None) -> dict[str, Any]:
     """Consulta vecinos LLDP vía lldpctl o networkctl en Linux; degrada seguro en otros SO."""
@@ -30,6 +32,7 @@ def get_lldp_neighbor(iface: str | None) -> dict[str, Any]:
                 text=True,
                 timeout=3.0,
                 check=False,
+                **no_window_kwargs(),
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 data = json.loads(proc.stdout)
@@ -60,6 +63,7 @@ def get_lldp_neighbor(iface: str | None) -> dict[str, Any]:
                 text=True,
                 timeout=3.0,
                 check=False,
+                **no_window_kwargs(),
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 neighbors = []

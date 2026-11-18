@@ -168,7 +168,11 @@ def _run_throughput_sender(
 
 
 def _run_throughput_receiver(
-    server_ip: str, data_port: int, chunk_size: int, streams: int = 1
+    server_ip: str,
+    data_port: int,
+    chunk_size: int,
+    streams: int = 1,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Recibe 1 o N flujos TCP paralelos (Servidor -> Cliente) hasta EOF."""
     streams = max(1, streams)
@@ -179,9 +183,16 @@ def _run_throughput_receiver(
         total = 0
         try:
             with socket.create_connection((server_ip, data_port), timeout=15.0) as sock:
-                sock.settimeout(30.0)
+                sock.settimeout(2.0 if cancel_event is not None else 30.0)
                 while True:
-                    data = sock.recv(chunk_size)
+                    if cancel_event is not None and cancel_event.is_set():
+                        break
+                    try:
+                        data = sock.recv(chunk_size)
+                    except socket.timeout:
+                        if cancel_event is not None and cancel_event.is_set():
+                            break
+                        continue
                     if not data:
                         break
                     total += len(data)
@@ -219,19 +230,27 @@ def _run_full_duplex_client(
     duration_s: int,
     chunk_size: int,
     streams: int,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Ejecuta transmisión y recepción TCP simultáneas (Full-Duplex real)."""
     out: dict[str, Any] = {}
+    errors: list[Exception] = []
 
     def _tx() -> None:
-        out["client_tx"] = _run_throughput_sender(
-            server_ip, rx_port, duration_s, chunk_size, streams
-        )
+        try:
+            out["client_tx"] = _run_throughput_sender(
+                server_ip, rx_port, duration_s, chunk_size, streams, cancel_event=cancel_event
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
 
     def _rx() -> None:
-        out["client_rx"] = _run_throughput_receiver(
-            server_ip, tx_port, chunk_size, streams
-        )
+        try:
+            out["client_rx"] = _run_throughput_receiver(
+                server_ip, tx_port, chunk_size, streams, cancel_event=cancel_event
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
 
     t_tx = threading.Thread(target=_tx, daemon=True)
     t_rx = threading.Thread(target=_rx, daemon=True)
@@ -239,44 +258,69 @@ def _run_full_duplex_client(
     t_rx.start()
     t_tx.join()
     t_rx.join()
+    if errors:
+        raise errors[0]
     return out
 
 
 def _run_ber_sender(
-    server_ip: str, data_port: int, num_blocks: int, block_size: int
+    server_ip: str,
+    data_port: int,
+    num_blocks: int,
+    block_size: int,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Envía bloques deterministas con cabecera CRC32 para verificar integridad."""
+    sent = 0
     with socket.create_connection((server_ip, data_port), timeout=15.0) as data_sock:
         data_sock.settimeout(15.0)
         for seq_id in range(num_blocks):
+            if cancel_event is not None and cancel_event.is_set():
+                break
             payload = generate_deterministic_block(seq_id, block_size)
             crc = zlib.crc32(payload) & 0xFFFFFFFF
             header = struct.pack(BER_HEADER_FMT, seq_id, block_size, crc)
             data_sock.sendall(header + payload)
-    return {"blocks_sent": num_blocks, "block_size_bytes": block_size}
+            sent += 1
+    return {"blocks_sent": sent, "block_size_bytes": block_size}
 
 
 def _run_udp_jitter_sender(
-    server_ip: str, data_port: int, duration_s: int, pps: int, packet_size: int = 256
+    server_ip: str,
+    data_port: int,
+    duration_s: int,
+    pps: int,
+    packet_size: int = 256,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Envía datagramas UDP espaciados para medir pérdida y jitter en el servidor."""
     total_packets = max(1, duration_s * pps)
     interval_s = 1.0 / max(1, pps)
     padding = b"\xaa" * max(0, packet_size - UDP_HEADER_SIZE)
+    sent = 0
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_sock:
         next_send = time.perf_counter()
         for seq_id in range(total_packets):
+            if cancel_event is not None and cancel_event.is_set():
+                break
             now = time.perf_counter()
-            if now < next_send:
-                time.sleep(next_send - now)
+            remaining = next_send - now
+            if remaining > 0.0015:
+                time.sleep(remaining - 0.001)
+            while time.perf_counter() < next_send:
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+            if cancel_event is not None and cancel_event.is_set():
+                break
             send_ts = time.perf_counter()
             pkt = struct.pack(UDP_HEADER_FMT, seq_id, send_ts) + padding
             udp_sock.sendto(pkt, (server_ip, data_port))
+            sent += 1
             next_send += interval_s
 
     return {
-        "packets_sent": total_packets,
+        "packets_sent": sent,
         "pps_target": pps,
         "packet_size_bytes": len(padding) + UDP_HEADER_SIZE,
     }
@@ -449,6 +493,14 @@ def write_markdown_summary(path: str, report: dict[str, Any]) -> None:
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _recv_ok_or_raise(sock: socket.socket) -> dict[str, Any]:
+    """Lee una respuesta de control y lanza RuntimeError si el servidor reportó ERROR."""
+    resp = recv_control_msg(sock)
+    if resp.get("status") == "ERROR":
+        raise RuntimeError(str(resp.get("error") or "Error reportado por el servidor."))
+    return resp
+
+
 def run_diagnostic(
     cfg: DiagnosticConfig,
     on_progress: Callable[[int, str], None] | None = None,
@@ -492,11 +544,11 @@ def run_diagnostic(
         local_link = get_link_info(local_iface).to_dict()
 
         send_control_msg(ctrl, {"cmd": "HELLO"})
-        hello_resp = recv_control_msg(ctrl)
+        hello_resp = _recv_ok_or_raise(ctrl)
 
         client_snap_before = get_nic_snapshot(local_iface).to_dict()
         send_control_msg(ctrl, {"cmd": "SNAPSHOT_NIC", "label": "before"})
-        server_snap_before = recv_control_msg(ctrl)["snapshot"]
+        server_snap_before = _recv_ok_or_raise(ctrl)["snapshot"]
 
         notify(40, f"[3/5] Throughput TCP ({cfg.duration_s} s, {streams} flujos)...")
         send_control_msg(
@@ -507,7 +559,7 @@ def run_diagnostic(
                 "streams": streams,
             },
         )
-        tp_ready = recv_control_msg(ctrl)
+        tp_ready = _recv_ok_or_raise(ctrl)
         client_tp = _run_throughput_sender(
             cfg.server_ip,
             tp_ready["data_port"],
@@ -529,10 +581,15 @@ def run_diagnostic(
                     "streams": streams,
                 },
             )
-            tp_rev_ready = recv_control_msg(ctrl)
+            tp_rev_ready = _recv_ok_or_raise(ctrl)
             client_tp_rev = _run_throughput_receiver(
-                cfg.server_ip, tp_rev_ready["data_port"], cfg.chunk_size, streams
+                cfg.server_ip,
+                tp_rev_ready["data_port"],
+                cfg.chunk_size,
+                streams,
+                cancel_event=cancel_event,
             )
+            check_cancelled()
 
         client_tp_dup: dict[str, Any] | None = None
         if cfg.full_duplex:
@@ -546,7 +603,7 @@ def run_diagnostic(
                     "streams": streams,
                 },
             )
-            dup_ready = recv_control_msg(ctrl)
+            dup_ready = _recv_ok_or_raise(ctrl)
             client_tp_dup = _run_full_duplex_client(
                 cfg.server_ip,
                 dup_ready["rx_port"],
@@ -554,14 +611,21 @@ def run_diagnostic(
                 cfg.duration_s,
                 cfg.chunk_size,
                 streams,
+                cancel_event=cancel_event,
             )
+            check_cancelled()
 
         notify(78, f"[4/5] Integridad / BER ({cfg.ber_blocks} bloques)...")
         send_control_msg(ctrl, {"cmd": "START_BER"})
-        ber_ready = recv_control_msg(ctrl)
+        ber_ready = _recv_ok_or_raise(ctrl)
         client_ber = _run_ber_sender(
-            cfg.server_ip, ber_ready["data_port"], cfg.ber_blocks, cfg.ber_block_size
+            cfg.server_ip,
+            ber_ready["data_port"],
+            cfg.ber_blocks,
+            cfg.ber_block_size,
+            cancel_event=cancel_event,
         )
+        check_cancelled()
 
         client_udp: dict[str, Any] | None = None
         if cfg.udp_jitter:
@@ -575,10 +639,15 @@ def run_diagnostic(
                     "expected_packets": expected_pkts,
                 },
             )
-            udp_ready = recv_control_msg(ctrl)
+            udp_ready = _recv_ok_or_raise(ctrl)
             client_udp = _run_udp_jitter_sender(
-                cfg.server_ip, udp_ready["data_port"], cfg.udp_duration_s, cfg.udp_pps
+                cfg.server_ip,
+                udp_ready["data_port"],
+                cfg.udp_duration_s,
+                cfg.udp_pps,
+                cancel_event=cancel_event,
             )
+            check_cancelled()
 
         udp_sweep_entries: list[dict[str, Any]] | None = None
         if cfg.udp_sweep:
@@ -598,16 +667,18 @@ def run_diagnostic(
                         "expected_packets": expected_pkts,
                     },
                 )
-                sw_ready = recv_control_msg(ctrl)
+                sw_ready = _recv_ok_or_raise(ctrl)
                 sw_tx = _run_udp_jitter_sender(
                     cfg.server_ip,
                     sw_ready["data_port"],
                     cfg.udp_sweep_duration_s,
                     pps,
                     packet_size=sz,
+                    cancel_event=cancel_event,
                 )
+                check_cancelled()
                 send_control_msg(ctrl, {"cmd": "GET_RESULTS"})
-                sw_rx = recv_control_msg(ctrl)["results"].get("udp_jitter", {})
+                sw_rx = _recv_ok_or_raise(ctrl)["results"].get("udp_jitter", {})
                 udp_sweep_entries.append(
                     {
                         "packet_size_bytes": sw_tx["packet_size_bytes"],
@@ -620,12 +691,12 @@ def run_diagnostic(
         notify(95, "[5/5] Telemetría final de NICs, AutoTest y consolidación...")
         client_snap_after = get_nic_snapshot(local_iface).to_dict()
         send_control_msg(ctrl, {"cmd": "SNAPSHOT_NIC", "label": "after"})
-        server_snap_after = recv_control_msg(ctrl)["snapshot"]
+        server_snap_after = _recv_ok_or_raise(ctrl)["snapshot"]
 
         send_control_msg(ctrl, {"cmd": "GET_RESULTS"})
-        server_results = recv_control_msg(ctrl)["results"]
+        server_results = _recv_ok_or_raise(ctrl)["results"]
         send_control_msg(ctrl, {"cmd": "BYE"})
-        recv_control_msg(ctrl)
+        _recv_ok_or_raise(ctrl)
 
     autotest_res = run_network_autotest(
         local_iface,

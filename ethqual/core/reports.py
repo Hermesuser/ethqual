@@ -52,9 +52,18 @@ def write_html_report(path: str, reports: list[dict[str, Any]]) -> None:
     if not reports:
         raise ValueError("Se requiere al menos un reporte para generar el HTML.")
 
-    first_meta = reports[0].get("metadata", {})
-    project = html.escape(str(first_meta.get("project_name") or "Proyecto Ethernet"))
-    technician = html.escape(str(first_meta.get("technician") or "No especificado"))
+    projects = list(dict.fromkeys(
+        str(r.get("metadata", {}).get("project_name") or "").strip()
+        for r in reports
+        if str(r.get("metadata", {}).get("project_name") or "").strip()
+    ))
+    technicians = list(dict.fromkeys(
+        str(r.get("metadata", {}).get("technician") or "").strip()
+        for r in reports
+        if str(r.get("metadata", {}).get("technician") or "").strip()
+    ))
+    project = html.escape(", ".join(projects) or "Proyecto Ethernet")
+    technician = html.escape(", ".join(technicians) or "No especificado")
     generated = html.escape(str(reports[-1].get("metadata", {}).get("timestamp_utc", "")))
 
     total = len(reports)
@@ -118,17 +127,20 @@ def write_html_report(path: str, reports: list[dict[str, Any]]) -> None:
 <html lang="es">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Reporte de Cualificación Ethernet — {project}</title>
 <style>
-  body {{ font-family: -apple-system, "Segoe UI", Inter, sans-serif; color: #111827; margin: 32px; background: #fff; }}
-  .header {{ display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #1E293B; padding-bottom: 16px; margin-bottom: 20px; }}
+  * {{ box-sizing: border-box; }}
+  body {{ font-family: -apple-system, "Segoe UI", Inter, sans-serif; color: #111827; margin: 24px; background: #fff; }}
+  .header {{ display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; border-bottom: 2px solid #1E293B; padding-bottom: 16px; margin-bottom: 20px; }}
   h1 {{ margin: 0 0 6px 0; font-size: 22px; color: #0F172A; }}
   .meta {{ font-size: 13px; color: #475569; line-height: 1.5; }}
-  .summary {{ display: flex; gap: 12px; margin-bottom: 22px; }}
-  .stat {{ flex: 1; border: 1px solid #CBD5E1; border-radius: 8px; padding: 12px 16px; }}
+  .summary {{ display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 22px; }}
+  .stat {{ flex: 1 1 150px; border: 1px solid #CBD5E1; border-radius: 8px; padding: 12px 16px; }}
   .stat .k {{ font-size: 11px; text-transform: uppercase; color: #64748B; font-weight: 600; }}
   .stat .v {{ font-size: 22px; font-weight: 700; margin-top: 4px; }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+  .table-wrap {{ width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+  table {{ width: 100%; min-width: 720px; border-collapse: collapse; font-size: 13px; }}
   th {{ text-align: left; background: #F1F5F9; color: #334155; padding: 10px; border-bottom: 2px solid #CBD5E1; font-size: 12px; text-transform: uppercase; }}
   td {{ padding: 10px; border-bottom: 1px solid #E2E8F0; vertical-align: top; }}
   .badge {{ display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; }}
@@ -137,7 +149,11 @@ def write_html_report(path: str, reports: list[dict[str, Any]]) -> None:
   .fail {{ background: #FEE2E2; color: #991B1B; }}
   .muted {{ color: #64748B; font-size: 12px; }}
   .footer {{ margin-top: 28px; padding-top: 12px; border-top: 1px solid #CBD5E1; font-size: 11px; color: #64748B; }}
-  @media print {{ body {{ margin: 12mm; }} }}
+  @media (max-width: 640px) {{
+    body {{ margin: 12px; }}
+    .meta[style*="text-align:right"] {{ text-align: left !important; }}
+  }}
+  @media print {{ body {{ margin: 12mm; }} .table-wrap {{ overflow: visible; }} table {{ min-width: 0; }} }}
 </style>
 </head>
 <body>
@@ -161,23 +177,25 @@ def write_html_report(path: str, reports: list[dict[str, Any]]) -> None:
     <div class="stat"><div class="k">Advertencias</div><div class="v" style="color:#D97706">{warned}</div></div>
     <div class="stat"><div class="k">Fallos</div><div class="v" style="color:#DC2626">{failed}</div></div>
   </div>
-  <table>
-    <thead>
-      <tr>
-        <th>ID Toma / Perfil</th>
-        <th>Veredicto</th>
-        <th>Throughput TCP</th>
-        <th>ICMP RTT / Pérdida</th>
-        <th>Enlace PHY (C / S)</th>
-        <th>Switch / Puerto (LLDP)</th>
-        <th>BER App</th>
-        <th>Observaciones</th>
-      </tr>
-    </thead>
-    <tbody>
-      {"".join(rows_html)}
-    </tbody>
-  </table>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>ID Toma / Perfil</th>
+          <th>Veredicto</th>
+          <th>Throughput TCP</th>
+          <th>ICMP RTT / Pérdida</th>
+          <th>Enlace PHY (C / S)</th>
+          <th>Switch / Puerto (LLDP)</th>
+          <th>BER App</th>
+          <th>Observaciones</th>
+        </tr>
+      </thead>
+      <tbody>
+        {"".join(rows_html)}
+      </tbody>
+    </table>
+  </div>
   <div class="footer">
     Generado por ethqual. Nota técnica: Este documento cualifica el rendimiento, integridad y negociación de enlace activo entre dos equipos. No reemplaza una certificación de capa física RF (NEXT/FEXT/Atenuación en dB) conforme a ANSI/TIA-568.2-D.
   </div>
@@ -224,10 +242,13 @@ def write_labels_html(path: str, reports: list[dict[str, Any]]) -> None:
         )
     doc = (
         "<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
         "<title>Etiquetas Patch Panel — ethqual</title>"
         "<style>body{font-family:sans-serif;margin:16px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}"
         ".label{border:1px dashed #94A3B8;padding:10px;border-radius:6px;text-align:center}"
-        ".cid{font-size:15px;font-weight:700}.sub{font-size:11px;color:#475569;margin:4px 0}.bc{margin-top:4px}</style>"
+        ".cid{font-size:15px;font-weight:700}.sub{font-size:11px;color:#475569;margin:4px 0}.bc{margin-top:4px}"
+        "@media(max-width:720px){.grid{grid-template-columns:repeat(2,1fr)}}"
+        "@media(max-width:480px){.grid{grid-template-columns:1fr}}</style>"
         f"</head><body><div class='grid'>{''.join(cards)}</div></body></html>"
     )
     Path(path).write_text(doc, encoding="utf-8")

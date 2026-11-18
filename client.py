@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from ethqual.core.discovery import discover_servers, run_port_blink
@@ -106,15 +107,22 @@ def main() -> None:
         max_loss_pct=args.max_loss,
         max_error_delta=args.max_error_delta,
     )
-    if args.soak_rounds > 1:
-        report = run_soak_test(
-            cfg,
-            rounds=args.soak_rounds,
-            interval_s=args.soak_interval,
-            on_progress=lambda _pct, msg: print(msg),
-        )
-    else:
-        report = run_diagnostic(cfg, on_progress=lambda _pct, msg: print(msg))
+    try:
+        if args.soak_rounds > 1:
+            report = run_soak_test(
+                cfg,
+                rounds=args.soak_rounds,
+                interval_s=args.soak_interval,
+                on_progress=lambda _pct, msg: print(msg),
+            )
+        else:
+            report = run_diagnostic(cfg, on_progress=lambda _pct, msg: print(msg))
+    except KeyboardInterrupt:
+        print("\n[ethqual] Diagnóstico interrumpido por el usuario.", file=sys.stderr)
+        sys.exit(130)
+    except (OSError, RuntimeError) as exc:
+        print(f"[ethqual] Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     Path(args.output).write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"

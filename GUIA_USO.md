@@ -1,4 +1,4 @@
-# Manual de Usuario en Campo — `ethqual v0.2.0`
+# Manual de Usuario en Campo — `ethqual v0.3.0`
 
 Esta guía describe paso a paso cómo operar **ethqual** (GUI nativa y CLI) para cualificar enlaces Ethernet entre dos notebooks (macOS Apple Silicon/Intel, Windows 11 o Linux).
 
@@ -17,8 +17,8 @@ Esta guía describe paso a paso cómo operar **ethqual** (GUI nativa y CLI) para
 ## 2. Operación en Interfaz Gráfica (`python3 gui.py`)
 
 ### Paso A — Equipo Servidor
-1. Abre la pestaña **Modo Servidor**.
-2. Pulsa **Iniciar Servidor** (arranca el receptor TCP y el Beacon de autodescubrimiento LAN).
+1. Abre la pestaña **Modo Servidor** (las interfaces/IPs activas se actualizan automáticamente; usa **Actualizar IPs** si conectas un adaptador USB-Ethernet después).
+2. Pulsa **Iniciar Servidor** (arranca el receptor TCP concurrente y el Beacon de autodescubrimiento LAN).
 3. Usa **Copiar IP** si necesitas compartir la IP manualmente.
 
 ### Paso B — Equipo Cliente
@@ -33,12 +33,12 @@ Esta guía describe paso a paso cómo operar **ethqual** (GUI nativa y CLI) para
    - **Blink Puerto:** Hace parpadear el LED del puerto del switch a 1 Hz durante 8 s para identificar bocas sin etiquetar.
    - **Wiggle Test:** Inicia una gráfica en tiempo real mientras mueves los conectores RJ45; emite una alerta sonora (`beep`) y marca en rojo si ocurre cualquier micro-corte.
    - **Soak / DHCP:** Configura `Soak > 1` para pruebas de estabilidad prolongada en varias rondas, y marca `DHCP` si deseas escanear servidores DHCP duplicados en la red.
-5. Pulsa **Iniciar Diagnóstico** (puedes abortar en cualquier momento con **Cancelar**).
+5. Pulsa **Iniciar Diagnóstico** (o `Ctrl+Enter` / `Cmd+Enter`; puedes abortar en cualquier momento con **Cancelar** o `Esc`).
 6. Al finalizar:
    - El **Stepper de 5 fases** y el **Banner de Veredicto** muestran `APROBADO`, `ADVERTENCIA` o `FALLO`.
    - El panel inferior detalla errores y **Remediales Sugeridos** (causa probable + solución).
-   - El **ID Toma** se auto-incrementa (`P1-R1-01` → `P1-R1-02`) y el lote se autoguarda en `~/.ethqual/last_session.jsonl`.
-7. Exporta el entregable con **Exportar Reporte HTML** (imprimible a PDF, incluye LLDP y código de barras), **Etiquetas Patch Panel** (hoja HTML o CSV), **Exportar reporte.json** o **Exportar resumen.md**.
+   - El **ID Toma** se auto-incrementa (`P1-R1-01` → `P1-R1-02`) y el lote se autoguarda en `~/.ethqual/last_session.jsonl` (usa **Ver Lote** para inspeccionar/eliminar tomas o **Deshacer última** para quitar la más reciente).
+7. Exporta el entregable con **Exportar Reporte HTML** (imprimible a PDF, responsive, incluye LLDP y código de barras), **Etiquetas Patch Panel** (hoja HTML o CSV), **Exportar reporte.json** o **Exportar resumen.md**. Las preferencias y el tamaño de ventana se guardan en `~/.ethqual/prefs.json`.
 
 ---
 

@@ -1,3 +1,3 @@
 """ethqual — Herramienta de cualificación y diagnóstico de enlaces Ethernet."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

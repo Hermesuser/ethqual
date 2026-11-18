@@ -261,8 +261,34 @@ class TestMetricsAndVerdict(unittest.TestCase):
             self.assertIn("T-01", html_txt)
             self.assertIn("SW-CORE / Gi1/0/5", html_txt)
             self.assertIn("<svg", html_txt)
+            self.assertIn("viewport", html_txt)
+            self.assertIn("table-wrap", html_txt)
             self.assertIn("Obra X,T-01,APROBADO,1000,930.0", csv_p.read_text(encoding="utf-8"))
-            self.assertIn("<svg", lbl_html_p.read_text(encoding="utf-8"))
+            lbl_txt = lbl_html_p.read_text(encoding="utf-8")
+            self.assertIn("<svg", lbl_txt)
+            self.assertIn("@media(max-width:720px)", lbl_txt)
+
+    def test_diagnostic_cancel_event(self) -> None:
+        import threading
+        from ethqual.core.engine import run_diagnostic, run_soak_test
+
+        ev = threading.Event()
+        ev.set()
+        cfg = DiagnosticConfig(server_ip="127.0.0.1")
+        with self.assertRaises(RuntimeError):
+            run_diagnostic(cfg, cancel_event=ev)
+        with self.assertRaises(RuntimeError):
+            run_soak_test(cfg, rounds=2, interval_s=1, cancel_event=ev)
+
+    def test_recv_ok_or_raise_handles_server_error(self) -> None:
+        from ethqual.core.engine import _recv_ok_or_raise
+
+        s1, s2 = socket.socketpair()
+        with s1, s2:
+            send_control_msg(s1, {"status": "ERROR", "error": "puerto ocupado"})
+            with self.assertRaises(RuntimeError) as ctx:
+                _recv_ok_or_raise(s2)
+            self.assertIn("puerto ocupado", str(ctx.exception))
 
     def test_remediation_for_ip_conflict_and_dhcp(self) -> None:
         thresholds = {

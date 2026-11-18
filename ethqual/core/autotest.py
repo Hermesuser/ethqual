@@ -47,6 +47,17 @@ def get_default_gateway() -> str | None:
                 check=False,
                 **no_window_kwargs(),
             )
+            candidates: list[tuple[int, str]] = []
+            for line in proc.stdout.splitlines():
+                m = re.search(
+                    r"0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)\s+\d+\.\d+\.\d+\.\d+\s+(\d+)",
+                    line,
+                )
+                if m:
+                    candidates.append((int(m.group(2)), m.group(1)))
+            if candidates:
+                candidates.sort(key=lambda item: item[0])
+                return candidates[0][1]
             match = re.search(
                 r"0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)", proc.stdout
             )
@@ -96,6 +107,7 @@ def run_ethtool_cable_test(iface: str | None) -> dict[str, Any]:
             text=True,
             timeout=6.0,
             check=False,
+            **no_window_kwargs(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return {"supported": False, "reason": str(exc), "pairs": {}}
